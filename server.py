@@ -1,14 +1,29 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-
+import json
+import tempfile
+from functools import lru_cache
+from typing import TypedDict
 import os
+from pathlib import Path
 from typing import Any
-
+import pyvo as vo
 from mcp.server.fastmcp import FastMCP
 
-
+TABLE_NAME = "csc21.observation_source"
 SERVER_NAME = "chandra-xsa-tap"
 DEFAULT_TAP_ENDPOINT = "https://example.invalid/chandra/xsa/tap"
+
+ADQL_EXAMPLES = [
+    {
+        "user_query": "Find 10 sources from observation_source.",
+        "tap_query": "SELECT TOP 10 * FROM csc21.observation_source"
+    },
+    {
+        "user_query": "Show the ra and dec of 5 rows in observation_source.",
+        "tap_query": "SELECT TOP 5 ra, dec FROM csc21.observation_source"
+    },
+]
 
 mcp = FastMCP(
     name=SERVER_NAME,
@@ -20,6 +35,102 @@ mcp = FastMCP(
     log_level="WARNING",
 )
 
+class ColumnsResult(TypedDict):
+    table_name: str
+    column_count: int
+    column_names: list[str]
+
+
+class ColumnMetadataRow(TypedDict):
+    column_name: str
+    datatype: str | None
+    unit: str | None
+    ucd: str | None
+    utype: str | None
+    description: str | None
+    indexed: int | bool | None
+    principal: int | bool | None
+    std: int | bool | None
+
+
+class ColumnMetadataResult(TypedDict):
+    table_name: str
+    column_count: int
+    columns: list[ColumnMetadataRow]
+
+
+tap = vo.dal.TAPService("http://cda.cfa.harvard.edu/csc21tap")
+
+@mcp.tool()
+def list_all_tables() -> dict:
+    """
+    Return all available table names from the TAP service.
+    No input arguments required.
+    """
+    table_names = sorted(tap.tables.keys())
+
+    return {
+        "table_count": len(table_names),
+        "table_names": table_names,
+    }
+
+@mcp.tool()
+def get_observation_source_columns(table_name) -> dict:
+    """
+    Return all column names for csc21.observation_source.
+    """
+    table = tap.tables[table_name]
+    column_names = [col.name for col in table.columns]
+
+    return {
+        "table_name": table_name,
+        "column_count": len(column_names),
+        "column_names": column_names,
+    }
+
+@mcp.tool()
+def get_observation_source_column_metadata(table_name) -> dict:
+    """
+    Return detailed column metadata for csc21.observation_source.
+    """
+    query = f"""
+    SELECT
+        table_name,
+        column_name,
+        datatype,
+        unit,
+        ucd,
+        utype,
+        description,
+        indexed,
+        principal,
+        std
+    FROM TAP_SCHEMA.columns
+    WHERE table_name = '{table_name}'
+    ORDER BY column_name
+    """
+
+    results = tap.search(query)
+
+    columns = []
+    for row in results:
+        columns.append({
+            "column_name": row["column_name"],
+            "datatype": row["datatype"],
+            "unit": row["unit"],
+            "ucd": row["ucd"],
+            "utype": row["utype"],
+            "description": row["description"],
+            "indexed": row["indexed"],
+            "principal": row["principal"],
+            "std": row["std"],
+        })
+
+    return {
+        "table_name": table_name,
+        "column_count": len(columns),
+        "columns": columns,
+    }
 
 def run_chandra_tap_query(adql: str, max_rows: int = 100) -> dict[str, Any]:
     endpoint = os.getenv("CHANDRA_TAP_ENDPOINT", DEFAULT_TAP_ENDPOINT)
@@ -40,18 +151,81 @@ def run_chandra_tap_query(adql: str, max_rows: int = 100) -> dict[str, Any]:
         "rows": [],
     }
 
+@mcp.tool()
+def get_adql_examples() -> dict:
+    """
+    Return example user queries paired with correct TAP/ADQL queries.
+    This is intended to ground the agent in how natural-language requests
+    map to valid ADQL for the TAP service.
+    """
+    return {
+        "example_count": len(ADQL_EXAMPLES),
+        "examples": ADQL_EXAMPLES,
+    }
+
+def _jsonify(value: Any) -> Any:
+    if value is None:
+        return None
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return value
+
 
 @mcp.tool(
     name="query_chandra_tap",
-    description=(
-        "Run an ADQL query against a Chandra/XSA TAP service and return rows plus "
-        "basic request metadata. This is a placeholder implementation for now."
-    ),
+    description="Run an ADQL query against the Chandra TAP service and return a preview.",
     structured_output=True,
 )
-def query_chandra_tap(adql: str, max_rows: int = 100) -> dict[str, Any]:
-    """Execute a placeholder TAP query until the real Chandra/XSA backend is wired in."""
-    return run_chandra_tap_query(adql=adql, max_rows=max_rows)
+def query_chandra_tap(adql: str, max_rows: int = 50) -> dict[str, Any]:
+    results = tap.search(adql, maxrec=max_rows)
+    columns = list(results.fieldnames)
+
+    rows = []
+    for record in results:
+        rows.append({col: _jsonify(record[col]) for col in columns})
+
+    return {
+        "adql": adql,
+        "row_count": len(rows),
+        "columns": columns,
+        "rows": rows,
+        "preview_only": True,
+    }
+
+
+@mcp.tool(
+    name="export_chandra_tap_jsonl",
+    description="Run an ADQL query and save the full result as JSONL.",
+    structured_output=True,
+)
+def export_chandra_tap_jsonl(adql: str, max_rows: int = 50000) -> dict[str, Any]:
+    results = tap.run_async(adql, maxrec=max_rows)
+    columns = list(results.fieldnames)
+
+    output_dir = Path(tempfile.gettempdir()) / "chandra_mcp_exports"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = output_dir / "tap_result.jsonl"
+
+    row_count = 0
+    with output_path.open("w", encoding="utf-8") as f:
+        for record in results:
+            row = {col: _jsonify(record[col]) for col in columns}
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            row_count += 1
+
+    return {
+        "status": "ok",
+        "adql": adql,
+        "row_count": row_count,
+        "columns": columns,
+        "file_path": str(output_path),
+        "file_name": output_path.name,
+        "format": "jsonl",
+    }
 
 
 if __name__ == "__main__":
