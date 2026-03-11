@@ -32,6 +32,8 @@ mcp = FastMCP(
         "implementation is a placeholder so the tool contract can be wired in now "
         "and replaced with the real transport later."
     ),
+    host="0.0.0.0",
+    port=8001,
     log_level="WARNING",
 )
 
@@ -59,7 +61,7 @@ class ColumnMetadataResult(TypedDict):
     columns: list[ColumnMetadataRow]
 
 
-tap = vo.dal.TAPService("http://cda.cfa.harvard.edu/csc21tap")
+tap = vo.dal.TAPService("https://cda.cfa.harvard.edu/csc21tap")
 
 @mcp.tool()
 def list_all_tables() -> dict:
@@ -176,10 +178,16 @@ def _jsonify(value: Any) -> Any:
 
 @mcp.tool(
     name="query_chandra_tap",
-    description="Run an ADQL query against the Chandra TAP service and return a preview.",
+    description=(
+        "Run an ADQL query against the Chandra TAP service. "
+        "Returns ALL matching rows by default (max_rows=10000). "
+        "The UI renders results as a sortable, downloadable table. "
+        "Do NOT add TOP or LIMIT to the ADQL unless the user explicitly asks for a subset. "
+        "For result sets larger than 10000 rows, use export_chandra_tap_jsonl instead."
+    ),
     structured_output=True,
 )
-def query_chandra_tap(adql: str, max_rows: int = 50) -> dict[str, Any]:
+def query_chandra_tap(adql: str, max_rows: int = 10000) -> dict[str, Any]:
     results = tap.search(adql, maxrec=max_rows)
     columns = list(results.fieldnames)
 
@@ -187,12 +195,14 @@ def query_chandra_tap(adql: str, max_rows: int = 50) -> dict[str, Any]:
     for record in results:
         rows.append({col: _jsonify(record[col]) for col in columns})
 
+    truncated = len(rows) >= max_rows
+
     return {
         "adql": adql,
         "row_count": len(rows),
         "columns": columns,
         "rows": rows,
-        "preview_only": True,
+        "truncated": truncated,
     }
 
 
@@ -229,4 +239,7 @@ def export_chandra_tap_jsonl(adql: str, max_rows: int = 50000) -> dict[str, Any]
 
 
 if __name__ == "__main__":
+    if "--streaming" in os.sys.argv:
+        print("Starting MCP server in streaming mode...")
+        mcp.run(transport="streamable-http")
     mcp.run(transport="stdio")
