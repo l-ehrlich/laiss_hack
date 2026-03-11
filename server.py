@@ -27,15 +27,27 @@ ADQL_EXAMPLES = [
     },
 ]
 
-mcp = FastMCP(
-    name=SERVER_NAME,
+chandra_mcp = FastMCP(
+    name="chandra-csc-tap",
     instructions=(
-        "Expose Chandra/XSA TAP retrieval tools over MCP. The current TAP query "
-        "implementation is a placeholder so the tool contract can be wired in now "
-        "and replaced with the real transport later."
+        "Chandra Source Catalog (CSC 2.1) archive tools. "
+        "Query the Chandra TAP service for X-ray source detections, "
+        "observation metadata, and catalog columns."
     ),
     host="0.0.0.0",
     port=8001,
+    log_level="WARNING",
+)
+
+xmm_mcp = FastMCP(
+    name="xmm-newton-xsa-tap",
+    instructions=(
+        "XMM-Newton Science Archive (XSA) tools. "
+        "Query the XMM-Newton TAP service for X-ray observations, "
+        "source detections, and catalog metadata."
+    ),
+    host="0.0.0.0",
+    port=8002,
     log_level="WARNING",
 )
 
@@ -65,7 +77,7 @@ class ColumnMetadataResult(TypedDict):
 
 tap = vo.dal.TAPService("https://cda.cfa.harvard.edu/csc21tap")
 
-@mcp.tool()
+@chandra_mcp.tool()
 def list_all_tables() -> dict:
     """
     Return all available table names from the TAP service.
@@ -78,7 +90,7 @@ def list_all_tables() -> dict:
         "table_names": table_names,
     }
 
-@mcp.tool()
+@chandra_mcp.tool()
 def get_table_columns(table_name) -> dict:
     """
     Return all column names for input table.
@@ -92,7 +104,7 @@ def get_table_columns(table_name) -> dict:
         "column_names": column_names,
     }
 
-@mcp.tool()
+@chandra_mcp.tool()
 def get_table_column_metadata(table_name) -> dict:
     """
     Return detailed column metadata for input table.
@@ -155,7 +167,7 @@ def run_chandra_tap_query(adql: str, max_rows: int = 100) -> dict[str, Any]:
         "rows": [],
     }
 
-@mcp.tool()
+@chandra_mcp.tool()
 def get_adql_examples() -> dict:
     """
     Return example user queries paired with correct TAP/ADQL queries.
@@ -191,7 +203,7 @@ def _astropy_table_to_rows(table) -> tuple[list[str], list[dict[str, Any]]]:
         rows.append({col: _jsonify(record[col]) for col in columns})
     return columns, rows
 
-@mcp.tool()
+@xmm_mcp.tool()
 def list_all_xmm_tables() -> dict:
     """
     Return all available table names from the XMM-Newton XSA TAP service.
@@ -203,7 +215,7 @@ def list_all_xmm_tables() -> dict:
         "table_names": table_names,
     }
 
-@mcp.tool()
+@xmm_mcp.tool()
 def get_xmm_table_columns(table_name: str) -> dict:
     """
     Return all column names for an XMM-Newton XSA TAP table.
@@ -216,7 +228,7 @@ def get_xmm_table_columns(table_name: str) -> dict:
         "column_names": column_names,
     }
 
-@mcp.tool()
+@xmm_mcp.tool()
 def get_xmm_table_column_metadata(table_name: str) -> dict:
     """
     Return detailed column metadata for an XMM-Newton XSA TAP table.
@@ -244,7 +256,7 @@ def get_xmm_table_column_metadata(table_name: str) -> dict:
         "columns": serialized,
     }
 
-@mcp.tool(
+@xmm_mcp.tool(
     name="query_xmm_tap",
     description="Run an ADQL query against the XMM-Newton XSA TAP service and return a preview.",
     structured_output=True,
@@ -262,7 +274,7 @@ def query_xmm_tap(adql: str) -> dict[str, Any]:
         "preview_only": True,
     }
 
-@mcp.tool(
+@xmm_mcp.tool(
     name="export_xmm_tap_jsonl",
     description="Run an ADQL query against the XMM-Newton XSA TAP service and save the full result as JSONL.",
     structured_output=True,
@@ -296,7 +308,7 @@ def export_xmm_tap_jsonl(adql: str) -> dict[str, Any]:
 
 
 
-@mcp.tool(
+@chandra_mcp.tool(
     name="query_chandra_tap",
     description=(
         "Run an ADQL query against the Chandra TAP service. "
@@ -326,7 +338,7 @@ def query_chandra_tap(adql: str, max_rows: int = 10000) -> dict[str, Any]:
     }
 
 
-@mcp.tool(
+@chandra_mcp.tool(
     name="export_chandra_tap_jsonl",
     description="Run an ADQL query and save the full result as JSONL.",
     structured_output=True,
@@ -359,7 +371,31 @@ def export_chandra_tap_jsonl(adql: str, max_rows: int = 50000) -> dict[str, Any]
 
 
 if __name__ == "__main__":
-    if "--streaming" in os.sys.argv:
-        print("Starting MCP server in streaming mode...")
-        mcp.run(transport="streamable-http")
-    mcp.run(transport="stdio")
+    import sys
+    import asyncio
+    import uvicorn
+
+    args = set(sys.argv[1:])
+
+    if "--streaming" in args:
+        # Run both servers concurrently
+        async def run_both():
+            chandra_app = chandra_mcp.streamable_http_app()
+            xmm_app = xmm_mcp.streamable_http_app()
+
+            config_c = uvicorn.Config(chandra_app, host="0.0.0.0", port=8001, log_level="warning")
+            config_x = uvicorn.Config(xmm_app, host="0.0.0.0", port=8002, log_level="warning")
+
+            server_c = uvicorn.Server(config_c)
+            server_x = uvicorn.Server(config_x)
+
+            print("Chandra MCP on port 8001, XMM-Newton MCP on port 8002")
+            await asyncio.gather(server_c.serve(), server_x.serve())
+
+        asyncio.run(run_both())
+    elif "--chandra" in args:
+        chandra_mcp.run(transport="streamable-http")
+    elif "--xmm" in args:
+        xmm_mcp.run(transport="streamable-http")
+    else:
+        chandra_mcp.run(transport="stdio")
