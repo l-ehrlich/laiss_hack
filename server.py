@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 import pyvo as vo
 from mcp.server.fastmcp import FastMCP
+from astroquery.esa.xmm_newton import XMMNewton
+from uuid import uuid4
 
 TABLE_NAME = "csc21.observation_source"
 SERVER_NAME = "chandra-xsa-tap"
@@ -75,9 +77,9 @@ def list_all_tables() -> dict:
     }
 
 @mcp.tool()
-def get_observation_source_columns(table_name) -> dict:
+def get_table_columns(table_name) -> dict:
     """
-    Return all column names for csc21.observation_source.
+    Return all column names for input table.
     """
     table = tap.tables[table_name]
     column_names = [col.name for col in table.columns]
@@ -89,9 +91,9 @@ def get_observation_source_columns(table_name) -> dict:
     }
 
 @mcp.tool()
-def get_observation_source_column_metadata(table_name) -> dict:
+def get_table_column_metadata(table_name) -> dict:
     """
-    Return detailed column metadata for csc21.observation_source.
+    Return detailed column metadata for input table.
     """
     query = f"""
     SELECT
@@ -166,12 +168,130 @@ def get_adql_examples() -> dict:
 def _jsonify(value: Any) -> Any:
     if value is None:
         return None
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
     if hasattr(value, "item"):
         try:
             return value.item()
         except Exception:
             pass
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
     return value
+
+def _astropy_table_to_rows(table) -> tuple[list[str], list[dict[str, Any]]]:
+    columns = list(table.colnames)
+    rows = []
+    for record in table:
+        rows.append({col: _jsonify(record[col]) for col in columns})
+    return columns, rows
+
+@mcp.tool()
+def list_all_xmm_tables() -> dict:
+    """
+    Return all available table names from the XMM-Newton XSA TAP service.
+    """
+    table_names = sorted(str(t) for t in XMMNewton.get_tables())
+    return {
+        "mission": "xmm_newton",
+        "table_count": len(table_names),
+        "table_names": table_names,
+    }
+
+@mcp.tool()
+def get_xmm_table_columns(table_name: str) -> dict:
+    """
+    Return all column names for an XMM-Newton XSA TAP table.
+    """
+    column_names = list(XMMNewton.get_columns(table_name, only_names=True))
+    return {
+        "mission": "xmm_newton",
+        "table_name": table_name,
+        "column_count": len(column_names),
+        "column_names": column_names,
+    }
+
+@mcp.tool()
+def get_xmm_table_column_metadata(table_name: str) -> dict:
+    """
+    Return detailed column metadata for an XMM-Newton XSA TAP table.
+    """
+    columns = XMMNewton.get_columns(table_name, only_names=False)
+
+    serialized = []
+    for col in columns:
+        serialized.append({
+            "column_name": getattr(col, "name", None),
+            "datatype": getattr(col, "datatype", None),
+            "unit": getattr(col, "unit", None),
+            "ucd": getattr(col, "ucd", None),
+            "utype": getattr(col, "utype", None),
+            "description": getattr(col, "description", None),
+            "indexed": getattr(col, "indexed", None),
+            "principal": getattr(col, "principal", None),
+            "std": getattr(col, "std", None),
+        })
+
+    return {
+        "mission": "xmm_newton",
+        "table_name": table_name,
+        "column_count": len(serialized),
+        "columns": serialized,
+    }
+
+@mcp.tool(
+    name="query_xmm_tap",
+    description="Run an ADQL query against the XMM-Newton XSA TAP service and return a preview.",
+    structured_output=True,
+)
+def query_xmm_tap(adql: str) -> dict[str, Any]:
+    table = XMMNewton.query_xsa_tap(adql, output_format="votable")
+    columns, rows = _astropy_table_to_rows(table)
+
+    return {
+        "mission": "xmm_newton",
+        "adql": adql,
+        "row_count": len(rows),
+        "columns": columns,
+        "rows": rows,
+        "preview_only": True,
+    }
+
+@mcp.tool(
+    name="export_xmm_tap_jsonl",
+    description="Run an ADQL query against the XMM-Newton XSA TAP service and save the full result as JSONL.",
+    structured_output=True,
+)
+def export_xmm_tap_jsonl(adql: str) -> dict[str, Any]:
+    table = XMMNewton.query_xsa_tap(adql, output_format="votable")
+    columns = list(table.colnames)
+
+    output_dir = Path(tempfile.gettempdir()) / "xmm_mcp_exports"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = output_dir / f"xmm_tap_result_{uuid4().hex}.jsonl"
+
+    row_count = 0
+    with output_path.open("w", encoding="utf-8") as f:
+        for record in table:
+            row = {col: _jsonify(record[col]) for col in columns}
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            row_count += 1
+
+    return {
+        "mission": "xmm_newton",
+        "status": "ok",
+        "adql": adql,
+        "row_count": row_count,
+        "columns": columns,
+        "file_path": str(output_path),
+        "file_name": output_path.name,
+        "format": "jsonl",
+    }
+
 
 
 @mcp.tool(
