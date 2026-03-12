@@ -91,20 +91,6 @@ def list_all_tables() -> dict:
     }
 
 @chandra_mcp.tool()
-def get_table_columns(table_name) -> dict:
-    """
-    Return all column names for input table.
-    """
-    table = tap.tables[table_name]
-    column_names = [col.name for col in table.columns]
-
-    return {
-        "table_name": table_name,
-        "column_count": len(column_names),
-        "column_names": column_names,
-    }
-
-@chandra_mcp.tool()
 def get_table_column_metadata(table_name) -> dict:
     """
     Return detailed column metadata for input table.
@@ -146,25 +132,6 @@ def get_table_column_metadata(table_name) -> dict:
         "table_name": table_name,
         "column_count": len(columns),
         "columns": columns,
-    }
-
-def run_chandra_tap_query(adql: str, max_rows: int = 100) -> dict[str, Any]:
-    endpoint = os.getenv("CHANDRA_TAP_ENDPOINT", DEFAULT_TAP_ENDPOINT)
-    return {
-        "status": "placeholder",
-        "message": (
-            "Replace `run_chandra_tap_query` in server.py with your real XSA TAP "
-            "query implementation."
-        ),
-        "tap_endpoint": endpoint,
-        "adql": adql,
-        "max_rows": max_rows,
-        "notes": [
-            "This MCP tool contract is ready to be consumed by an MCP client.",
-            "The returned payload shape is intended to stay stable when you swap in the real TAP call.",
-            "Set CHANDRA_TAP_ENDPOINT to point at your target TAP service.",
-        ],
-        "rows": [],
     }
 
 @chandra_mcp.tool()
